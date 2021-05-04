@@ -1,6 +1,24 @@
 import pandas as pd
+import argparse
+import os
 
-from load_data import get_articles_emb, get_pd, get_articles
+parser = argparse.ArgumentParser()
+parser.add_argument("--data_path", type=str, default='./data')
+opt = parser.parse_args()
+
+def get_pd(pd_filename):
+    pd_file = pd.read_csv(pd_filename)
+    df = pd.DataFrame(pd_file)
+    return df
+
+def get_train_click_log():
+    return get_pd(os.path.join(opt.data_path, "train_click_log.csv"))
+
+def get_articles():
+    return get_pd(os.path.join(opt.data_path, "articles.csv"))
+
+def get_articles_emb():
+    return get_pd(os.path.join(opt.data_path, "articles_emb.csv"))
 
 def get_small_click_log():
     return get_pd('./gen_data/small_click_log.csv')
