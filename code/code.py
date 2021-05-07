@@ -38,6 +38,15 @@ def get_all_click_df(data_path=r'../tcdata/', offline=True):
     all_click = all_click.drop_duplicates((['user_id', 'click_article_id', 'click_timestamp']))
     return all_click
 
+# 读取文章的基本属性
+def get_item_info_df(data_path):
+    item_info_df = pd.read_csv(data_path + 'articles.csv')
+    
+    # 为了方便与训练集中的click_article_id拼接，需要把article_id修改成click_article_id
+    item_info_df = item_info_df.rename(columns={'article_id': 'click_article_id'})
+    
+    return item_info_df
+
 def get_user_item_time(click_df):
     
     click_df = click_df.sort_values('click_timestamp')
@@ -66,7 +75,18 @@ def get_hist_and_last_click(all_click):
     click_hist_df = all_click.groupby('user_id').apply(hist_func).reset_index(drop=True)
     return click_hist_df, click_last_df
 
-def itemcf_sim(df):
+# 获取文章id对应的基本属性，保存成字典的形式，方便后面召回阶段，冷启动阶段直接使用
+def get_item_info_dict(item_info_df):
+    max_min_scaler = lambda x : (x-np.min(x))/(np.max(x)-np.min(x))
+    item_info_df['created_at_ts'] = item_info_df[['created_at_ts']].apply(max_min_scaler)
+    
+    item_type_dict = dict(zip(item_info_df['click_article_id'], item_info_df['category_id']))
+    item_words_dict = dict(zip(item_info_df['click_article_id'], item_info_df['words_count']))
+    item_created_time_dict = dict(zip(item_info_df['click_article_id'], item_info_df['created_at_ts']))
+    
+    return item_type_dict, item_words_dict, item_created_time_dict
+
+def itemcf_sim(df, item_created_time_dict):
     """
         文章与文章之间的相似性矩阵计算
         :param df: 数据表
@@ -82,14 +102,24 @@ def itemcf_sim(df):
     item_cnt = defaultdict(int)
     for user, item_time_list in tqdm(user_item_time_dict.items()):
         # 在基于商品的协同过滤优化的时候可以考虑时间因素
-        for i, i_click_time in item_time_list:
+        for loc1, (i, i_click_time) in enumerate(item_time_list):
             item_cnt[i] += 1
             i2i_sim.setdefault(i, {})
-            for j, j_click_time in item_time_list:
+            for loc2, (j, j_click_time) in enumerate(item_time_list):
                 if(i == j):
                     continue
+
+                # 考虑文章的正向顺序点击和反向顺序点击    
+                loc_alpha = 1.0 if loc2 > loc1 else 0.7
+                # 位置信息权重，其中的参数可以调节
+                loc_weight = loc_alpha * (0.9 ** (np.abs(loc2 - loc1) - 1))
+                # 点击时间权重，其中的参数可以调节
+                click_time_weight = np.exp(0.7 ** np.abs(i_click_time - j_click_time))
+                # 两篇文章创建时间的权重，其中的参数可以调节
+                created_time_weight = np.exp(0.8 ** np.abs(item_created_time_dict[i] - item_created_time_dict[j]))
+
                 i2i_sim[i].setdefault(j, 0)
-                i2i_sim[i][j] += 1 / math.log(len(item_time_list) + 1)
+                i2i_sim[i][j] += loc_weight * click_time_weight * created_time_weight / math.log(len(item_time_list) + 1)
                 
     i2i_sim_ = i2i_sim.copy()
     for i, related_items in i2i_sim.items():
@@ -117,7 +147,6 @@ def item_based_recommend(user_id, user_item_time_dict, i2i_sim, sim_item_topk, r
     # 获取用户历史交互的文章
     user_hist_items = user_item_time_dict[user_id]
     user_hist_items_ = {user_id for user_id, _ in user_hist_items}
-    
     item_rank = {}
     for loc, (i, click_time) in enumerate(user_hist_items):
         for j, wij in sorted(i2i_sim[i].items(), key=lambda x: x[1], reverse=True)[:sim_item_topk]:
@@ -159,8 +188,13 @@ if __name__ == '__main__':
     all_click_df = get_all_click_df()
     # 提取最后一次点击作为召回评估，如果不需要做召回评估直接使用全量的训练集进行召回(线下验证模型)
     # 如果不是召回评估，直接使用全量数据进行召回，不用将最后一次提取出来
+    print('read complete')
     all_click_df, trn_last_click_df = get_hist_and_last_click(all_click_df)
-    i2i_sim = itemcf_sim(all_click_df)
+    print('itemcf_sim start')
+    item_info_df = get_item_info_df('../tcdata/')
+    # 获取文章的属性信息，保存成字典的形式方便查询
+    item_type_dict, item_words_dict, item_created_time_dict = get_item_info_dict(item_info_df)
+    i2i_sim = itemcf_sim(all_click_df, item_created_time_dict)
     # 定义
     user_recall_items_dict = collections.defaultdict(dict)
     # 获取 用户 - 文章 - 点击时间的字典*
@@ -173,7 +207,8 @@ if __name__ == '__main__':
     recall_item_num = 10
     # 用户热度补全
     item_topk_click = get_item_topk_click(all_click_df, k=0)
-
+    
+    print('recommend start')
     for user in tqdm(all_click_df['user_id'].unique()):
         user_recall_items_dict[user] = item_based_recommend(user, user_item_time_dict, i2i_sim, 
                                                             sim_item_topk, recall_item_num, item_topk_click)
