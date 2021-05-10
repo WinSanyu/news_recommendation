@@ -204,6 +204,10 @@ def item_based_recommend(user_id, user_item_time_dict, i2i_sim, sim_item_topk, r
         
     return item_rank
 
+def item_based_recommend_thread(args):
+    user_id, user_item_time_dict, i2i_sim, sim_item_topk, recall_item_num, item_topk_click = args
+    return item_based_recommend(user_id, user_item_time_dict, i2i_sim, sim_item_topk, recall_item_num, item_topk_click)
+
 def get_user_activate_degree_dict(all_click_df):
     all_click_df_ = all_click_df.groupby('user_id')['click_article_id'].count().reset_index()
     
@@ -418,7 +422,7 @@ if __name__ == '__main__':
                             # 'youtubednn_usercf_recall': 1.0, 
                             # 'cold_start_recall': 1.0
                             }
-    all_click_df = get_all_click_df()
+    all_click_df = get_all_click_sample()
     all_click_df = reduce_mem(all_click_df)
     # 提取最后一次点击作为召回评估，如果不需要做召回评估直接使用全量的训练集进行召回(线下验证模型)
     # 如果不是召回评估，直接使用全量数据进行召回，不用将最后一次提取出来
@@ -442,9 +446,17 @@ if __name__ == '__main__':
     item_topk_click = get_item_topk_click(all_click_df, k=0)
     
     if recall_strategy_dict['itemcf_sim_itemcf_recall'] == True:
-        for user in tqdm(all_click_df['user_id'].unique()):
-            user_recall_items_dict[user] = item_based_recommend(user, user_item_time_dict, i2i_sim, 
-                                                                sim_item_topk, recall_item_num, item_topk_click)
+        len_it = len(all_click_df['user_id'].unique())
+        it = zip(all_click_df['user_id'].unique(),[user_item_time_dict]*len_it,[i2i_sim]*len_it,[sim_item_topk]*len_it,[recall_item_num]*len_it,[item_topk_click]*len_it)
+        from multiprocessing import Pool as ThreadPool
+        with ThreadPool(4) as p:
+            res = p.map(item_based_recommend_thread, it)
+        for i, user in enumerate(all_click_df['user_id'].unique()):
+            user_recall_items_dict[user] = res[i]
+        if 0:
+            for user in tqdm(all_click_df['user_id'].unique()):
+                user_recall_items_dict[user] = item_based_recommend(user, user_item_time_dict, i2i_sim, 
+                                                                    sim_item_topk, recall_item_num, item_topk_click)
         user_multi_recall_dict['itemcf_sim_itemcf_recall'] = user_recall_items_dict
 
     # 由于usercf计算时候太耗费内存了，这里就不直接运行了
