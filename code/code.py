@@ -350,20 +350,83 @@ def metrics_recall(user_recall_items_dict, trn_last_click_df, topk=5):
         mrr = round(nmrr * 1.0 / user_num, 5)
         print(' topk: ', k, ' : ', 'hit_num: ', hit_num, 'hit_rate: ', hit_rate, 'user_num : ', user_num,'precision:',precision,'recall:',recall,'f1:',f1,'mrr:',mrr)
 
+def combine_recall_results(user_multi_recall_dict, weight_dict=None, topk=25):
+    final_recall_items_dict = {}
+    
+    # 对每一种召回结果按照用户进行归一化，方便后面多种召回结果，相同用户的物品之间权重相加
+    def norm_user_recall_items_sim(sorted_item_list):
+        # 如果冷启动中没有文章或者只有一篇文章，直接返回，出现这种情况的原因可能是冷启动召回的文章数量太少了，
+        # 基于规则筛选之后就没有文章了, 这里还可以做一些其他的策略性的筛选
+        if len(sorted_item_list) < 2:
+            return sorted_item_list
+        
+        min_sim = sorted_item_list[-1][1]
+        max_sim = sorted_item_list[0][1]
+        
+        norm_sorted_item_list = []
+        for item, score in sorted_item_list:
+            if max_sim > 0:
+                norm_score = 1.0 * (score - min_sim) / (max_sim - min_sim) if max_sim > min_sim else 1.0
+            else:
+                norm_score = 0.0
+            norm_sorted_item_list.append((item, norm_score))
+            
+        return norm_sorted_item_list
+    
+    print('多路召回合并...')
+    for method, user_recall_items in tqdm(user_multi_recall_dict.items()):
+        print(method + '...')
+        # 在计算最终召回结果的时候，也可以为每一种召回结果设置一个权重
+        if weight_dict == None:
+            recall_method_weight = 1
+        else:
+            recall_method_weight = weight_dict[method]
+        
+        for user_id, sorted_item_list in user_recall_items.items(): # 进行归一化
+            user_recall_items[user_id] = norm_user_recall_items_sim(sorted_item_list)
+        
+        for user_id, sorted_item_list in user_recall_items.items():
+            # print('user_id')
+            final_recall_items_dict.setdefault(user_id, {})
+            for item, score in sorted_item_list:
+                final_recall_items_dict[user_id].setdefault(item, 0)
+                final_recall_items_dict[user_id][item] += recall_method_weight * score  
+    
+    final_recall_items_dict_rank = {}
+    # 多路召回时也可以控制最终的召回数量
+    for user, recall_item_dict in final_recall_items_dict.items():
+        final_recall_items_dict_rank[user] = sorted(recall_item_dict.items(), key=lambda x: x[1], reverse=True)[:topk]
+
+    # 将多路召回后的最终结果字典保存到本地
+    # pickle.dump(final_recall_items_dict_rank, open(os.path.join(save_path, 'final_recall_items_dict.pkl'),'wb'))
+
+    return final_recall_items_dict_rank
 
 if __name__ == '__main__':
-    recall_strategy = 0
-    all_click_df = get_all_click_sample()
+    # 定义一个多路召回的字典，将各路召回的结果都保存在这个字典当中
+    user_multi_recall_dict =  {'itemcf_sim_itemcf_recall': {},
+                                'usercf_sim_usercf_recall': {},
+                                # 'embedding_sim_item_recall': {},
+                                # 'youtubednn_recall': {},
+                                # 'youtubednn_usercf_recall': {}, 
+                                # 'cold_start_recall': {}
+                                }
+    recall_strategy_dict = {'itemcf_sim_itemcf_recall': True,
+                            'usercf_sim_usercf_recall': True,
+                            # 'embedding_sim_item_recall': 1.0,
+                            # 'youtubednn_recall': 1.0,
+                            # 'youtubednn_usercf_recall': 1.0, 
+                            # 'cold_start_recall': 1.0
+                            }
+    all_click_df = get_all_click_df()
     all_click_df = reduce_mem(all_click_df)
     # 提取最后一次点击作为召回评估，如果不需要做召回评估直接使用全量的训练集进行召回(线下验证模型)
     # 如果不是召回评估，直接使用全量数据进行召回，不用将最后一次提取出来
-    print('read complete')
     all_click_df, trn_last_click_df = get_hist_and_last_click(all_click_df)
-    print('itemcf_sim start')
     item_info_df = get_item_info_df('../tcdata/')
     # 获取文章的属性信息，保存成字典的形式方便查询
     item_type_dict, item_words_dict, item_created_time_dict = get_item_info_dict(item_info_df)
-    if recall_strategy == 0:
+    if recall_strategy_dict['itemcf_sim_itemcf_recall'] == True:
         i2i_sim = itemcf_sim(all_click_df, item_created_time_dict)
     # 定义
     user_recall_items_dict = collections.defaultdict(dict)
@@ -378,25 +441,38 @@ if __name__ == '__main__':
     # 用户热度补全
     item_topk_click = get_item_topk_click(all_click_df, k=0)
     
-    if recall_strategy == 0:
+    if recall_strategy_dict['itemcf_sim_itemcf_recall'] == True:
         for user in tqdm(all_click_df['user_id'].unique()):
             user_recall_items_dict[user] = item_based_recommend(user, user_item_time_dict, i2i_sim, 
                                                                 sim_item_topk, recall_item_num, item_topk_click)
+        user_multi_recall_dict['itemcf_sim_itemcf_recall'] = user_recall_items_dict
 
     # 由于usercf计算时候太耗费内存了，这里就不直接运行了
     # 如果是采样的话，是可以运行的
-    if recall_strategy == 1:
+    if recall_strategy_dict['usercf_sim_usercf_recall'] == True:
         user_activate_degree_dict = get_user_activate_degree_dict(all_click_df)
         u2u_sim = usercf_sim(all_click_df, user_activate_degree_dict)
 
     sim_user_topk = 10
     emb_i2i_sim = {}
-    if recall_strategy == 1:
+    if recall_strategy_dict['usercf_sim_usercf_recall'] == True:
         for user in tqdm(all_click_df['user_id'].unique()):
             user_recall_items_dict[user] = user_based_recommend(user, user_item_time_dict, u2u_sim, sim_user_topk,
                                                                 recall_item_num, item_topk_click, item_created_time_dict, emb_i2i_sim)
+        user_multi_recall_dict['usercf_sim_usercf_recall'] = user_recall_items_dict
     
-    metrics_recall(user_recall_items_dict, trn_last_click_df, topk=10)
+    weight_dict = {'itemcf_sim_itemcf_recall': 1.0,
+                    'usercf_sim_usercf_recall': 1.0,
+                    # 'embedding_sim_item_recall': 1.0,
+                    # 'youtubednn_recall': 1.0,
+                    # 'youtubednn_usercf_recall': 1.0, 
+                    # 'cold_start_recall': 1.0
+                    }
+    
+    # 最终合并之后每个用户召回150个商品进行排序
+    final_recall_items_dict_rank = combine_recall_results(user_multi_recall_dict, weight_dict, topk=150)
+
+    metrics_recall(final_recall_items_dict_rank, trn_last_click_df, topk=10)
 
     # 将字典的形式转换成df
     # user_item_score_list = []
