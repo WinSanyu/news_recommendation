@@ -13,7 +13,7 @@ from collections import defaultdict
 import collections
 from sklearn.preprocessing import MinMaxScaler
 warnings.filterwarnings('ignore')
-
+save_path = r'../user_data/'
 # 节约内存的一个标配函数
 def reduce_mem(df):
     starttime = time.time()
@@ -410,6 +410,26 @@ def combine_recall_results(user_multi_recall_dict, weight_dict=None, recall_stra
 
     return final_recall_items_dict_rank
 
+# 生成提交文件
+def submit(recall_df, topk=5, model_name=None):
+    recall_df = recall_df.sort_values(by=['user_id', 'pred_score'])
+    recall_df['rank'] = recall_df.groupby(['user_id'])['pred_score'].rank(ascending=False, method='first')
+    
+    # 判断是不是每个用户都有5篇文章及以上
+    tmp = recall_df.groupby('user_id').apply(lambda x: x['rank'].max())
+    # assert tmp.min() >= topk
+    
+    del recall_df['pred_score']
+    submit = recall_df[recall_df['rank'] <= topk].set_index(['user_id', 'rank']).unstack(-1).reset_index()
+    
+    submit.columns = [int(col) if isinstance(col, int) else col for col in submit.columns.droplevel(0)]
+    # 按照提交格式定义列名
+    submit = submit.rename(columns={'': 'user_id', 1: 'article_1', 2: 'article_2', 
+                                                  3: 'article_3', 4: 'article_4', 5: 'article_5'})
+
+    save_name = save_path + model_name + '_' + datetime.today().strftime('%m-%d') + '.csv'
+    submit.to_csv(save_name, index=False, header=True)
+
 if __name__ == '__main__':
     # 定义一个多路召回的字典，将各路召回的结果都保存在这个字典当中
     user_multi_recall_dict =  {'itemcf_sim_itemcf_recall': {},
@@ -420,14 +440,14 @@ if __name__ == '__main__':
                                 # 'cold_start_recall': {}
                                 }
     recall_strategy_dict = {'itemcf_sim_itemcf_recall': True,
-                            'usercf_sim_usercf_recall': True,
+                            'usercf_sim_usercf_recall': False,
                             # 'embedding_sim_item_recall': 1.0,
                             # 'youtubednn_recall': 1.0,
                             # 'youtubednn_usercf_recall': 1.0, 
                             # 'cold_start_recall': 1.0
                             }
-    all_click_df = get_all_click_df()
-    # all_click_df = all_click_df[all_click_df['user_id']<1000]
+    all_click_df = get_all_click_df(offline=False)
+    all_click_df = all_click_df[all_click_df['user_id']>=200000]
     all_click_df = reduce_mem(all_click_df)
     # 提取最后一次点击作为召回评估，如果不需要做召回评估直接使用全量的训练集进行召回(线下验证模型)
     # 如果不是召回评估，直接使用全量数据进行召回，不用将最后一次提取出来
@@ -503,15 +523,26 @@ if __name__ == '__main__':
                     }
     
     # 最终合并之后每个用户召回150个商品进行排序
-    final_recall_items_dict_rank = combine_recall_results(user_multi_recall_dict, weight_dict, recall_strategy_dict, topk=10)
+    final_recall_items_dict_rank = combine_recall_results(user_multi_recall_dict, weight_dict, recall_strategy_dict, topk=150)
 
     metrics_recall(final_recall_items_dict_rank, trn_last_click_df, topk=10)
 
     # 将字典的形式转换成df
-    # user_item_score_list = []
+    user_item_score_list = []
 
-    # for user, items in tqdm(user_recall_items_dict.items()):
-    #     for item, score in items:
-    #         user_item_score_list.append([user, item, score])
+    for user, items in tqdm(final_recall_items_dict_rank.items()):
+        for item, score in items:
+            user_item_score_list.append([user, item, score])
 
-    # recall_df = pd.DataFrame(user_item_score_list, columns=['user_id', 'click_article_id', 'pred_score'])
+    recall_df = pd.DataFrame(user_item_score_list, columns=['user_id', 'click_article_id', 'pred_score'])
+    print(recall_df)
+    # 获取测试集
+    data_path=r'../tcdata/'
+    tst_click = pd.read_csv(data_path + 'testA_click_log.csv')
+    tst_users = tst_click['user_id'].unique()
+
+    # 从所有的召回数据中将测试集中的用户选出来
+    tst_recall = recall_df[recall_df['user_id'].isin(tst_users)]
+
+    # 生成提交文件
+    submit(tst_recall, topk=5, model_name='itemcf_baseline')

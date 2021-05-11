@@ -315,10 +315,10 @@ def user_based_recommend(user_id, user_item_time_dict, u2u_sim, sim_user_topk, r
                 # 点击时的相对位置权重
                 loc_weight += 0.9 ** (len(user_item_time_list) - loc)
                 # 内容相似性权重
-                # if emb_i2i_sim.get(i, {}).get(j, None) is not None:
-                #     content_weight += emb_i2i_sim[i][j]
-                # if emb_i2i_sim.get(j, {}).get(i, None) is not None:
-                #     content_weight += emb_i2i_sim[j][i]
+                if emb_i2i_sim.get(i, {}).get(j, None) is not None:
+                    content_weight += emb_i2i_sim[i][j]
+                if emb_i2i_sim.get(j, {}).get(i, None) is not None:
+                    content_weight += emb_i2i_sim[j][i]
                 
                 # 创建时间差权重
                 created_time_weight += np.exp(0.8 * np.abs(item_created_time_dict[i] - item_created_time_dict[j]))
@@ -475,14 +475,14 @@ if __name__ == '__main__':
                                 # 'cold_start_recall': {}
                                 }
     recall_strategy_dict = {'itemcf_sim_itemcf_recall': True,
-                            'usercf_sim_usercf_recall': False,
+                            'usercf_sim_usercf_recall': True,
                             # 'embedding_sim_item_recall': 1.0,
                             # 'youtubednn_recall': 1.0,
                             # 'youtubednn_usercf_recall': 1.0, 
                             # 'cold_start_recall': 1.0
                             }
     all_click_df, item_emb_df = get_all_click_df()
-    # all_click_df = all_click_df[all_click_df['user_id']<1000]
+    all_click_df = all_click_df[all_click_df['user_id']<10000]
     all_click_df = reduce_mem(all_click_df)
     # 提取最后一次点击作为召回评估，如果不需要做召回评估直接使用全量的训练集进行召回(线下验证模型)
     # 如果不是召回评估，直接使用全量数据进行召回，不用将最后一次提取出来
@@ -536,7 +536,6 @@ if __name__ == '__main__':
         u2u_sim = usercf_sim(all_click_df, user_activate_degree_dict)
 
     sim_user_topk = 10
-    emb_i2i_sim = {}
     if recall_strategy_dict['usercf_sim_usercf_recall'] == True:
         # 定义
         user_recall_items_dict = collections.defaultdict(dict)
