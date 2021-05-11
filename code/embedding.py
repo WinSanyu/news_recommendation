@@ -6,6 +6,7 @@ import pickle
 import random
 from datetime import datetime
 from operator import itemgetter
+import faiss
 import numpy as np
 import pandas as pd
 import warnings
@@ -57,7 +58,8 @@ def get_all_click_sample(data_path=r'../user_data/tianchi_small/'):
     all_click = pd.read_csv(data_path + 'small_click_log.csv')
 
     all_click = all_click.drop_duplicates((['user_id', 'click_article_id', 'click_timestamp']))
-    return all_click
+    item_emb_df = pd.read_csv(data_path + 'small_emb.csv')
+    return all_click, item_emb_df
 
 # 读取点击数据，这里分成线上和线下，如果是为了获取线上提交结果应该讲测试集中的点击数据合并到总的数据中
 # 如果是为了线下验证模型的有效性或者特征的有效性，可以只使用训练集
@@ -71,7 +73,8 @@ def get_all_click_df(data_path=r'../tcdata/', offline=True):
         all_click = trn_click.append(tst_click)
     
     all_click = all_click.drop_duplicates((['user_id', 'click_article_id', 'click_timestamp']))
-    return all_click
+    item_emb_df = pd.read_csv(data_path + '/articles_emb.csv')
+    return all_click, item_emb_df
 
 # 读取文章的基本属性
 def get_item_info_df(data_path):
@@ -166,7 +169,7 @@ def itemcf_sim(df, item_created_time_dict):
     
     return i2i_sim_
 
-def item_based_recommend(user_id, user_item_time_dict, i2i_sim, sim_item_topk, recall_item_num, item_topk_click):
+def item_based_recommend(user_id, user_item_time_dict, i2i_sim, sim_item_topk, recall_item_num, item_topk_click, item_created_time_dict, emb_i2i_sim):
     """
         基于文章协同过滤的召回
         :param user_id: 用户id
@@ -187,9 +190,19 @@ def item_based_recommend(user_id, user_item_time_dict, i2i_sim, sim_item_topk, r
         for j, wij in sorted(i2i_sim[i].items(), key=lambda x: x[1], reverse=True)[:sim_item_topk]:
             if j in user_hist_items_:
                 continue
+
+            # 文章创建时间差权重
+            created_time_weight = np.exp(0.8 ** np.abs(item_created_time_dict[i] - item_created_time_dict[j]))
+            # 相似文章和历史点击文章序列中历史文章所在的位置权重
+            loc_weight = (0.9 ** (len(user_hist_items) - loc))
+            content_weight = 1.0
+            if emb_i2i_sim.get(i, {}).get(j, None) is not None:
+                content_weight += emb_i2i_sim[i][j]
+            if emb_i2i_sim.get(j, {}).get(i, None) is not None:
+                content_weight += emb_i2i_sim[j][i]
                 
             item_rank.setdefault(j, 0)
-            item_rank[j] +=  wij
+            item_rank[j] += created_time_weight * loc_weight * content_weight * wij
     
     # 不足10个，用热门商品补全
     if len(item_rank) < recall_item_num:
@@ -205,8 +218,8 @@ def item_based_recommend(user_id, user_item_time_dict, i2i_sim, sim_item_topk, r
     return item_rank
 
 def item_based_recommend_thread(args):
-    user_id, user_item_time_dict, i2i_sim, sim_item_topk, recall_item_num, item_topk_click = args
-    return item_based_recommend(user_id, user_item_time_dict, i2i_sim, sim_item_topk, recall_item_num, item_topk_click)
+    user_id, user_item_time_dict, i2i_sim, sim_item_topk, recall_item_num, item_topk_click, item_created_time_dict, emb_i2i_sim = args
+    return item_based_recommend(user_id, user_item_time_dict, i2i_sim, sim_item_topk, recall_item_num, item_topk_click, item_created_time_dict, emb_i2i_sim)
 
 def get_user_activate_degree_dict(all_click_df):
     all_click_df_ = all_click_df.groupby('user_id')['click_article_id'].count().reset_index()
@@ -410,6 +423,48 @@ def combine_recall_results(user_multi_recall_dict, weight_dict=None, recall_stra
 
     return final_recall_items_dict_rank
 
+# 向量检索相似度计算
+# topk指的是每个item, faiss搜索后返回最相似的topk个item
+def embdding_sim(click_df, item_emb_df, save_path, topk):
+    """
+        基于内容的文章embedding相似性矩阵计算
+        :param click_df: 数据表
+        :param item_emb_df: 文章的embedding
+        :param save_path: 保存路径
+        :patam topk: 找最相似的topk篇
+        return 文章相似性矩阵
+        
+        思路: 对于每一篇文章， 基于embedding的相似性返回topk个与其最相似的文章， 只不过由于文章数量太多，这里用了faiss进行加速
+    """
+    
+    # 文章索引与文章id的字典映射
+    item_idx_2_rawid_dict = dict(zip(item_emb_df.index, item_emb_df['article_id']))
+    
+    item_emb_cols = [x for x in item_emb_df.columns if 'emb' in x]
+    item_emb_np = np.ascontiguousarray(item_emb_df[item_emb_cols].values, dtype=np.float32)
+    # 向量进行单位化
+    item_emb_np = item_emb_np / np.linalg.norm(item_emb_np, axis=1, keepdims=True)
+    
+    # 建立faiss索引
+    item_index = faiss.IndexFlatIP(item_emb_np.shape[1])
+    item_index.add(item_emb_np)
+    # 相似度查询，给每个索引位置上的向量返回topk个item以及相似度
+    sim, idx = item_index.search(item_emb_np, topk) # 返回的是列表
+    
+    # 将向量检索的结果保存成原始id的对应关系
+    item_sim_dict = collections.defaultdict(dict)
+    for target_idx, sim_value_list, rele_idx_list in tqdm(zip(range(len(item_emb_np)), sim, idx)):
+        target_raw_id = item_idx_2_rawid_dict[target_idx]
+        # 从1开始是为了去掉商品本身, 所以最终获得的相似商品只有topk-1
+        for rele_idx, sim_value in zip(rele_idx_list[1:], sim_value_list[1:]): 
+            rele_raw_id = item_idx_2_rawid_dict[rele_idx]
+            item_sim_dict[target_raw_id][rele_raw_id] = item_sim_dict.get(target_raw_id, {}).get(rele_raw_id, 0) + sim_value
+    
+    # 保存i2i相似度矩阵
+    # pickle.dump(item_sim_dict, open(save_path + 'emb_i2i_sim.pkl', 'wb'))   
+    
+    return item_sim_dict
+
 if __name__ == '__main__':
     # 定义一个多路召回的字典，将各路召回的结果都保存在这个字典当中
     user_multi_recall_dict =  {'itemcf_sim_itemcf_recall': {},
@@ -420,13 +475,13 @@ if __name__ == '__main__':
                                 # 'cold_start_recall': {}
                                 }
     recall_strategy_dict = {'itemcf_sim_itemcf_recall': True,
-                            'usercf_sim_usercf_recall': True,
+                            'usercf_sim_usercf_recall': False,
                             # 'embedding_sim_item_recall': 1.0,
                             # 'youtubednn_recall': 1.0,
                             # 'youtubednn_usercf_recall': 1.0, 
                             # 'cold_start_recall': 1.0
                             }
-    all_click_df = get_all_click_df()
+    all_click_df, item_emb_df = get_all_click_df()
     # all_click_df = all_click_df[all_click_df['user_id']<1000]
     all_click_df = reduce_mem(all_click_df)
     # 提取最后一次点击作为召回评估，如果不需要做召回评估直接使用全量的训练集进行召回(线下验证模型)
@@ -450,13 +505,17 @@ if __name__ == '__main__':
     recall_item_num = 10
     # 用户热度补全
     item_topk_click = get_item_topk_click(all_click_df, k=0)
+
+    save_path = ''
+    emb_i2i_sim = embdding_sim(all_click_df, item_emb_df, save_path, topk=10) # topk可以自行设置
     
     if recall_strategy_dict['itemcf_sim_itemcf_recall'] == True:
         # 定义
         user_recall_items_dict = collections.defaultdict(dict)
         print('item_based_recommend start')
         len_it = len(all_click_df['user_id'].unique())
-        it = zip(all_click_df['user_id'].unique(),[user_item_time_dict]*len_it,[i2i_sim]*len_it,[sim_item_topk]*len_it,[recall_item_num]*len_it,[item_topk_click]*len_it)
+        it = zip(all_click_df['user_id'].unique(),[user_item_time_dict]*len_it,[i2i_sim]*len_it,[sim_item_topk]*len_it,
+                [recall_item_num]*len_it,[item_topk_click]*len_it,[item_created_time_dict]*len_it,[emb_i2i_sim]*len_it)
         from multiprocessing import Pool as ThreadPool
         with ThreadPool(4) as p:
             res = p.map(item_based_recommend_thread, it)
@@ -465,7 +524,8 @@ if __name__ == '__main__':
         if 0:
             for user in tqdm(all_click_df['user_id'].unique()):
                 user_recall_items_dict[user] = item_based_recommend(user, user_item_time_dict, i2i_sim, 
-                                                                    sim_item_topk, recall_item_num, item_topk_click)
+                                                                    sim_item_topk, recall_item_num, item_topk_click,
+                                                                    item_created_time_dict, emb_i2i_sim)
         user_multi_recall_dict['itemcf_sim_itemcf_recall'] = user_recall_items_dict
         print('item_based_recommend end')
 
