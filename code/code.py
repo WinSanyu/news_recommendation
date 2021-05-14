@@ -447,7 +447,7 @@ if __name__ == '__main__':
                             # 'cold_start_recall': 1.0
                             }
     all_click_df = get_all_click_df(offline=False)
-    all_click_df = all_click_df[all_click_df['user_id']>=200000]
+    # all_click_df = all_click_df[all_click_df['user_id']>=200000]
     all_click_df = reduce_mem(all_click_df)
     # 提取最后一次点击作为召回评估，如果不需要做召回评估直接使用全量的训练集进行召回(线下验证模型)
     # 如果不是召回评估，直接使用全量数据进行召回，不用将最后一次提取出来
